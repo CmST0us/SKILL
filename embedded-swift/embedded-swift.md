@@ -12,6 +12,7 @@
 - [ ] 没有重复定义 C 函数
 - [ ] 子类没有重复定义父类属性
 - [ ] `===` 运算符只用于类类型
+- [ ] 没有使用 `as?` 运行时类型检查（使用虚函数多态代替）
 
 ---
 
@@ -290,12 +291,117 @@ class Container {
 
 ---
 
+### 7. as? 运行时类型检查
+
+**严重程度**: 编译器崩溃 / 链接错误
+
+**问题描述**: Embedded Swift 不支持 `as?` 运行时类型检查。对类使用 `as?` 会导致编译器崩溃（"While deserializing SIL vtable" 错误），对协议使用 `as?` 会导致链接错误（缺少 `swift_conformsToProtocol` 运行时函数）。
+
+**错误示例**:
+```swift
+open class View {
+    open func draw() {}
+}
+
+class ModalView: View {
+    func dismiss(completion: @escaping () -> Void) {
+        // 动画 dismiss
+        completion()
+    }
+}
+
+class Router {
+    var modal: View?
+
+    func dismissModal() {
+        // ❌ 编译器崩溃: "While deserializing SIL vtable for 'ModalView'"
+        if let modalView = modal as? ModalView {
+            modalView.dismiss {
+                self.modal = nil
+            }
+        }
+    }
+}
+```
+
+**使用协议也不行**:
+```swift
+protocol Dismissable {
+    func dismiss(completion: @escaping () -> Void)
+}
+
+class Router {
+    var modal: View?
+
+    func dismissModal() {
+        // ❌ 链接错误: undefined reference to 'swift_conformsToProtocol'
+        if let dismissable = modal as? Dismissable {
+            dismissable.dismiss { self.modal = nil }
+        }
+    }
+}
+```
+
+**解决方案**: 使用虚函数多态（编译时多态）代替运行时类型检查
+
+```swift
+open class View {
+    open func draw() {}
+
+    // 在基类中定义可覆盖的方法和属性
+    open var canDismiss: Bool { false }
+
+    open func dismiss(completion: @escaping () -> Void) {
+        completion()  // 默认立即完成
+    }
+}
+
+class ModalView: View {
+    override var canDismiss: Bool { true }
+
+    override func dismiss(completion: @escaping () -> Void) {
+        // 动画 dismiss
+        completion()
+    }
+}
+
+class Router {
+    var modal: View?
+
+    func dismissModal() {
+        guard let modal = modal else { return }
+
+        // ✅ 使用属性检查 + 虚函数调用，无需运行时类型检查
+        if modal.canDismiss {
+            modal.dismiss {
+                self.modal = nil
+            }
+        } else {
+            self.modal = nil
+        }
+    }
+}
+```
+
+**核心原理**:
+- `as?` 需要运行时类型信息（RTTI），Embedded Swift 不支持
+- 虚函数调用在编译时通过 vtable 解析，无需运行时类型检查
+- 通过 `canXxx` 属性模拟类型能力检查
+
+**适用场景**:
+- 需要根据子类类型执行不同行为时
+- 需要检查对象是否支持某个操作时
+- 多态分派场景
+
+---
+
 ## 其他 Embedded Swift 限制
 
 ### 不支持的特性
 
 - **反射（Reflection）**: `Mirror` 类型不可用
-- **动态类型转换**: 部分 `as?` 和 `as!` 操作受限
+- **运行时类型检查**: `as?` 类型转换会导致编译器崩溃或链接错误（见规范第7条）
+- **协议一致性检查**: `swift_conformsToProtocol` 运行时函数不可用
 - **Codable**: `JSONEncoder`/`JSONDecoder` 不可用
 - **正则表达式**: `Regex` 类型不可用
 - **并发**: `async/await` 和 `Actor` 不可用
@@ -327,3 +433,20 @@ class Container {
 1. 找到使用协议类型的位置
 2. 将协议重构为基类
 3. 更新所有遵循协议的类型为继承基类
+
+### 编译器崩溃排查
+
+当遇到 `While deserializing SIL vtable for 'ClassName'` 错误时：
+
+1. 搜索代码中 `as? ClassName` 的用法
+2. 将运行时类型检查改为虚函数调用（见规范第7条）
+3. 在基类中添加 `canXxx` 属性和对应方法
+4. 子类覆盖这些方法提供具体实现
+
+### 协议一致性链接错误排查
+
+当遇到 `undefined reference to 'swift_conformsToProtocol'` 错误时：
+
+1. 搜索代码中 `as? ProtocolName` 的用法
+2. 同样需要改为虚函数调用方式
+3. 避免任何形式的 `as?` 运行时类型检查
