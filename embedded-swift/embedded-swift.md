@@ -6,13 +6,14 @@
 
 在提交代码前，确保以下问题都已避免：
 
-- [ ] 没有使用 `any Protocol` 类型（协议存在类型）
+- [ ] 没有使用 `any Protocol` 类型（协议存在类型，包括 `[Protocol]` 数组）
 - [ ] 没有使用 `String.count`（使用 `utf8.count` 代替）
 - [ ] 没有直接使用 C 预处理器宏
 - [ ] 没有重复定义 C 函数
 - [ ] 子类没有重复定义父类属性
 - [ ] `===` 运算符只用于类类型
 - [ ] 没有使用 `as?` 运行时类型检查（使用虚函数多态代替）
+- [ ] 没有使用 `weak` 引用（闭包中直接捕获 `self`）
 
 ---
 
@@ -20,21 +21,31 @@
 
 ### 1. Protocol Existential Types（协议存在类型）
 
-**严重程度**: 编译错误
+**严重程度**: 编译错误 / 运行时不工作
 
-**问题描述**: Embedded Swift 不支持 `any Protocol` 语法，这是 Swift 5.6+ 引入的协议存在类型表达方式。
+**问题描述**: Embedded Swift 不支持协议存在类型。这包括：
+- 显式的 `any Protocol` 语法
+- 隐式的协议类型数组 `[Protocol]`（等价于 `[any Protocol]`）
+- 协议类型参数 `func foo(_ p: Protocol)`（等价于 `func foo(_ p: any Protocol)`）
 
 **错误示例**:
 ```swift
-protocol View {
-    func draw()
+protocol Updateable {
+    func update()
 }
 
-class Container {
-    var children: [any View] = []  // ❌ 编译错误
+class AnimationManager {
+    // ❌ [Updateable] 实际上是 [any Updateable]，协议存在类型数组
+    var values: [Updateable] = []
 
-    func addChild(_ child: any View) {  // ❌ 编译错误
-        children.append(child)
+    func add(_ value: Updateable) {  // ❌ 协议存在类型参数
+        values.append(value)
+    }
+
+    func updateAll() {
+        for value in values {
+            value.update()  // 运行时可能不工作
+        }
     }
 }
 ```
@@ -42,23 +53,31 @@ class Container {
 **解决方案**: 将 Protocol 重构为 Class 基类
 
 ```swift
-open class View {
-    open func draw() {
+// ✅ 使用基类代替协议
+open class Updater {
+    open func update() {
         // 默认实现或留空
     }
 }
 
-class Container {
-    var children: [View] = []  // ✅ 正确
+class AnimationManager {
+    var values: [Updater] = []  // ✅ 类数组，不是协议存在类型
 
-    func addChild(_ child: View) {  // ✅ 正确
-        children.append(child)
+    func add(_ value: Updater) {  // ✅ 类类型参数
+        values.append(value)
+    }
+
+    func updateAll() {
+        for value in values {
+            value.update()  // ✅ 虚函数调用，正常工作
+        }
     }
 }
 
-class CustomView: View {
-    override func draw() {
-        // 自定义实现
+// 泛型类可以继承基类
+class AnimationValue<T>: Updater {
+    override func update() {
+        // 具体实现
     }
 }
 ```
@@ -67,6 +86,7 @@ class CustomView: View {
 - 使用 `open class` 允许跨模块继承
 - 使用 `open func` 允许子类重写方法
 - 所有原本遵循协议的类型改为继承基类
+- 泛型类也可以继承非泛型基类
 
 ---
 
@@ -395,6 +415,54 @@ class Router {
 
 ---
 
+### 8. weak 引用
+
+**严重程度**: 编译错误
+
+**问题描述**: Embedded Swift 不支持 `weak` 属性，因为它需要运行时支持来追踪弱引用。
+
+**错误示例**:
+```swift
+class MyPage: Page {
+    let menu: TileMenu
+
+    init() {
+        self.menu = TileMenu()
+        super.init(frame: .zero)
+
+        // ❌ 编译错误: attribute 'weak' cannot be used in embedded Swift
+        menu.onSelect = { [weak self] index in
+            self?.handleSelection(index: index)
+        }
+    }
+}
+```
+
+**解决方案**: 直接捕获 `self`，不使用 `weak`
+
+```swift
+class MyPage: Page {
+    let menu: TileMenu
+
+    init() {
+        self.menu = TileMenu()
+        super.init(frame: .zero)
+
+        // ✅ 正确：直接捕获 self
+        menu.onSelect = { index in
+            self.handleSelection(index: index)
+        }
+    }
+}
+```
+
+**注意事项**:
+- 在 Embedded Swift 中无法使用 `weak` 或 `unowned` 引用
+- 需要手动管理生命周期，确保闭包不会在对象销毁后被调用
+- 对于嵌入式环境，对象通常是长生命周期的，循环引用问题较少
+
+---
+
 ## 其他 Embedded Swift 限制
 
 ### 不支持的特性
@@ -402,6 +470,7 @@ class Router {
 - **反射（Reflection）**: `Mirror` 类型不可用
 - **运行时类型检查**: `as?` 类型转换会导致编译器崩溃或链接错误（见规范第7条）
 - **协议一致性检查**: `swift_conformsToProtocol` 运行时函数不可用
+- **弱引用**: `weak` 和 `unowned` 属性不可用（见规范第8条）
 - **Codable**: `JSONEncoder`/`JSONDecoder` 不可用
 - **正则表达式**: `Regex` 类型不可用
 - **并发**: `async/await` 和 `Actor` 不可用
